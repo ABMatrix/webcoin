@@ -10,6 +10,8 @@ const Inventory = require('bitcoin-inventory')
 const bitcoin = require('bitcoinjs-lib')
 const merkle = require('bitcoin-merkle-proof')
 
+async function sleep(time) { return new Promise((resolve) => setTimeout(resolve, time)); }
+
 // TODO: get this from somewhere else
 const { getTxHash } = require('bitcoin-net/src/utils.js')
 
@@ -49,6 +51,7 @@ class Node extends EventEmitter {
 
     this.peers = PeerGroup(this.params.net, opts.netOpts)
     this.peers.on('error', this.error)
+    this.peers.on('peerError', this.error)
 
     this.filterItems = []
     this._filter = null
@@ -64,12 +67,16 @@ class Node extends EventEmitter {
     this.scanTxs = []
   }
 
-  start () {
+  start (onHeaderDownloaded) {
+    console.log('start node')
+
+    if (onHeaderDownloaded) this.once('tip', onHeaderDownloaded)
     // connect to peers
     this.peers.connect(() => {
       // download headers, verify, and add to chain
       download(this.chain, this.peers)
         .then(() => {
+          console.log('tip==>')
           this.emit('tip')
           // TODO: listen for new blocks after tip
         })
@@ -77,7 +84,18 @@ class Node extends EventEmitter {
     })
   }
 
+  download_next(){
+    download(this.chain, this.peers)
+      .then(() => {
+        console.log('tip==>')
+        this.emit('tip')
+        // TODO: listen for new blocks after tip
+      })
+      .catch(this.error())
+  }
+
   filter (item) {
+    console.log("set filter = ",item)
     if (this._filter == null) {
       this._filter = Filter(this.peers, this.opts.filterOpts)
     }
@@ -104,6 +122,7 @@ class Node extends EventEmitter {
 
       // TODO: break up request into batches
       let height = this.chain.height()
+      console.log('==========scanning=========',height)
       let blockHashes = []
       for (let i = 0; i < range; i++) {
         let header = this.chain.getByHeight(height - i)
@@ -118,15 +137,18 @@ class Node extends EventEmitter {
         })
       })
 
+      console.log('sacn : get blcoks')
       let txSet = new Set()
 
       // verify proofs for blocks with txs that matched the filter
       let nonEmptyBlocks = blocks.filter((block) => !block.flags.equals(Buffer.from([ 0 ])))
+      console.log('nonEmptyBlocks lenth is ', nonEmptyBlocks.length)
       for (let merkleBlock of nonEmptyBlocks) {
         let hash = Blockchain.getHash(merkleBlock.header)
         let header = this.chain.getByHash(hash)
         if (header.height > height || (height - header.height) > range) {
           // block out of scan range (TODO: should this error?)
+          console.log('sacn : these blcoks do not contains the merkel block , contiune')
           continue
         }
         let matchedHashes = merkle.verify({
@@ -136,6 +158,7 @@ class Node extends EventEmitter {
           numTransactions: merkleBlock.numTransactions
         })
 
+        console.log('sacn : getting tx from peers')
         // get or wait for txs included in the proof
         // we use reverse tx order since the scan is already in reverse block order
         for (let hash of matchedHashes.reverse()) {
@@ -143,11 +166,12 @@ class Node extends EventEmitter {
           let existed = !!tx
           if (tx == null) {
             tx = await new Promise((resolve) => {
+              console.log('sacn : get one tx')
               this.peers.once(`tx:${hash.toString('base64')}`, resolve)
             })
           }
           txSet.add(tx)
-          onTransaction(tx, header)
+          onTransaction(tx, header, merkleBlock)
         }
       }
 
@@ -159,6 +183,7 @@ class Node extends EventEmitter {
       }
       this.scanTxs = []
     } finally {
+      console.log('here  this.scanning = false')
       this.scanning = false
     }
   }
@@ -236,11 +261,14 @@ class Node extends EventEmitter {
   }
 
   close () {
-     this.peers.close()
-   }
+    this.peers.close()
+  }
 
   error (err) {
+    console.log('node err ->',err,'<- node err')
     if (err == null) return
+    console.log('node error ==>',err,'<====node error')
+    console.log('node ============> close')
     this.close()
     this.emit('error', err)
   }
